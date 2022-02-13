@@ -9,6 +9,7 @@ import (
 )
 
 func FooControllerHandler(c *framework.Context) error {
+	// 在业务逻辑处理前，创建有定时器功能的 context
 	durationCtx, cancel := context.WithTimeout(c.BaseContext(), time.Duration(1*time.Second))
 	// 这里记得当所有事情处理结束后调用 cancel，告知 durationCtx 的后续 Context 结束
 	defer cancel()
@@ -34,6 +35,7 @@ func FooControllerHandler(c *framework.Context) error {
 	}()
 
 	// 请求监听的时候增加锁机制
+	// 在业务逻辑处理后，操作输出逻辑...
 	select {
 	// 监听 panic
 	case p := <-panicChan:
