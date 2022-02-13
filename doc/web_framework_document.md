@@ -1471,6 +1471,7 @@ func (g *Group) Get(uri string, handler ControllerHandler) {
 
 ....
 
+// core.go
 // Group 从core中初始化这个Group
 func (c *Core) Group(prefix string) IGroup {
 	return NewGroup(c, prefix)
@@ -1493,37 +1494,42 @@ func (c *Core) Group(prefix string) IGroup {
 
 所以回到路由，使用 IGroup 接口后，core.Group 这个方法返回的是一个约定，而 不依赖具体的 Group 实现。 
 
-
-
-- wait~
-
-
-
-
-
-
-
 ### 实现动态路由匹配 
 
-现在已经完成了前三个需求，下面我们考虑第四个需求，希望在写业务的时候能支持像下 列这种动态路由：
+现在已经完成了前三个需求，下面考虑第四个需求，希望在写业务的时候能支持像下列这种动态路由：
 
 ```go
+// 注册路由规则
 func registerRouter(core *framework.Core) {
-// 需求1+2:HTTP方法+静态路由匹配
-core.Get("/user/login", UserLoginController)
-// 需求3:批量通用前缀
-subjectApi := core.Group("/subject")
-{
-// 需求4:动态路由
-subjectApi.Delete("/:id", SubjectDelController)
-subjectApi.Put("/:id", SubjectUpdateController)
-subjectApi.Get("/:id", SubjectGetController)
-subjectApi.Get("/list/all", SubjectListController)
-}
+	// 设置控制器
+	core.Get("foo", FooControllerHandler)
+
+	// 需求1+2:HTTP方法+静态路由匹配
+	core.Get("/user/login", UserLoginController)
+
+	// 需求3:批量通用前缀
+	subjectApi := core.Group("/subject")
+	{
+		// 需求4:动态路由
+		subjectApi.Delete("/:id", SubjectDelController)
+		subjectApi.Put("/:id", SubjectUpdateController)
+		subjectApi.Get("/:id", SubjectGetController)
+		subjectApi.Get("/list/all", SubjectListController)
+	}
 }
 ```
 
-如何实现？我们继续看。 首先，你要知道的是，一旦引入了动态路由匹配的规则，之前使用的哈希规则就无法使用 了。因为有通配符，在匹配 Request-URI 的时候，请求 URI 的某个字符或者某些字符是 动态变化的，无法使用 URI 做为 key 来匹配。那么，我们就需要其他的算法来支持路由匹 配。 如果你对算法比较熟悉，会联想到这个问题本质是一个字符串匹配，而字符串匹配，比较 通用的高效方法就是字典树，也叫 trie 树。 这里，我们先简单梳理下 trie 树的数据结构。trie 树不同于二叉树，它是多叉的树形结 构，根节点一般是空字符串，而叶子节点保存的通常是字符串，一个节点的所有子孙节点 都有相同的字符串前缀。 所以根据 trie 树的特性，我们结合前三条路由规则，可以构建出这样的结构：
+如何实现？
+
+首先，要知道的是，一旦引入了动态路由匹配的规则，之前使用的哈希规则就无法使用了。因为有通配符，在匹配 Request-URI 的时候，请求 URI 的某个字符或者某些字符是动态变化的，无法使用 URI 做为 key 来匹配。
+
+那么，就需要其他的算法来支持路由匹 配。 
+
+如果对算法比较熟悉，会联想到这个问题**本质是一个字符串匹配**，而字符串匹配，比较通用的高效方法就是**字典树，也叫 trie 树**。 
+
+这里，先简单梳理下 trie 树的数据结构。trie 树不同于二叉树，它是多叉的树形结构，根节点一般是空字符串，而叶子节点保存的通常是字符串，一个节点的所有子孙节点都有相同的字符串前缀。 
+
+所以根据 trie 树的特性，结合前三条路由规则，可以构建出这样的结构：
 
 ```go
 1 /user/login
@@ -1537,127 +1543,167 @@ subjectApi.Get("/list/all", SubjectListController)
 
 ![image-20220212000043064](web_framework_document.assets/image-20220212000043064.png)
 
-这个 trie 树是按照路由地址的每个段 (segment) 来切分的，每个 segment 在 trie 树中都 能找到对应节点，每个节点保存一个 segment。树中，每个叶子节点都代表一个 URI，对 于中间节点来说，有的中间节点代表一个 URI（比如上图中的 /subject/name），而有的 中间节点并不是一个 URI（因为没有路由规则对应这个 URI）。 现在分析清楚了，我们开始动手实现 trie 树。还是照旧先明确下可以分为几步：
+这个 trie 树是按照路由地址的每个段 (segment) 来切分的，每个 segment 在 trie 树中都能找到对应节点，每个节点保存一个 segment。
+
+树中，每个叶子节点都代表一个 URI，对于中间节点来说，有的中间节点代表一个 URI（比如上图中的 /subject/name），而有的 中间节点并不是一个 URI（因为没有路由规则对应这个 URI）。 
+
+现在分析清楚了，开始动手实现 trie 树。还是照旧先明确下可以分为几步：
 
 - 定义树和节点的数据结构 
 - 编写函数：“增加路由规则” 
 - 编写函数：“查找路由” 
 - 将“增加路由规则”和“查找路由”添加到框架中
 
-步骤非常清晰，好，废话不多说，我们一步一步来，首先定义对应的数据结构（node 和 tree）。先在框架文件夹下创建 tree.go 文件，存储 trie 树相关逻辑：
+#### 定义数据结构（node 和 tree）
+
+步骤非常清晰，一步一步来，首先定义对应的数据结构（node 和 tree）。
+
+先在框架文件夹下创建 tree.go 文件，存储 trie 树相关逻辑：
 
 ```go
 // 代表树结构
 type Tree struct {
-root *node // 根节点
-  }
+	root *node // 根节点
+}
+
 // 代表节点
 type node struct {
-isLast bool // 代表这个节点是否可以成为最终的路由规则。该节点是否能成为一
-segment string // uri中的字符串，代表这个节点表示的路由中某个段的字符串
-handler ControllerHandler // 代表这个节点中包含的控制器，用于最终加载调用
-childs []*node // 代表这个节点下的子节点
+	isLast  bool              // 代表这个节点是否可以成为最终的路由规则。该节点是否能成为一
+	segment string            // uri中的字符串，代表这个节点表示的路由中某个段的字符串
+	handler ControllerHandler // 代表这个节点中包含的控制器，用于最终加载调用
+	childs  []*node           // 代表这个节点下的子节点
 }
 ```
 
-Tree 结构中包含一个根节点，只是这个根节点是一个没有 segment 的空的根节点。 node 的结构定义了四个字段。childs 字段让 node 组成了一个树形结构，handler 是具体 的业务控制器逻辑存放位置，segment 是树中的这个节点存放的内容，isLast 用于区别这 个树中的节点是否有实际的路由含义。 有了数据结构后，第二步，我们就往 Tree 这个 trie 树结构中增加“路由规则”的逻辑。 写之前，我们还是暂停一下想一想，会不会出现问题。之前提过会存在通配符，那直接加 规则其实是有可能冲突的。比如：
+Tree 结构中包含一个根节点，只是这个根节点是一个没有 segment 的空的根节点。 node 的结构定义了四个字段。childs 字段让 node 组成了一个树形结构，handler 是具体 的业务控制器逻辑存放位置，segment 是树中的这个节点存放的内容，isLast 用于区别这 个树中的节点是否有实际的路由含义。 
+
+#### 增加“路由规则”
+
+有了数据结构后，第二步，就往 Tree 这个 trie 树结构中增加“路由规则”的逻辑。 
+
+写之前，暂停一下想一想，会不会出现问题。之前提过会存在通配符，那直接加规则其实是有可能冲突的。比如：
 
 ```go
 /user/name
 /user/:id
 ```
 
-这两个路由规则实际上就冲突了，如果请求地址是 /user/name，那么两个规则都匹配， 无法确定哪个规则生效。所以在增加路由之前，我们需要判断这个路由规则是否已经在 trie 树中存在了。 这里，我们可以用 matchNode 方法，寻找某个路由在 trie 树中匹配的节点，如果有匹配 节点，返回节点指针，否则返回 nil。matchNode 方法的参数是一个 URI，返回值是指向 node 的指针，它的实现思路是使用函数递归，我简单说明一下思路： 首先，将需要匹配的 URI 根据第一个分隔符 / 进行分割，只需要最多分割成为两个段。 如果只能分割成一个段，说明 URI 中没有分隔符了，这时候再检查下一级节点中是否有匹 配这个段的节点就行。
+这两个路由规则实际上就冲突了，如果请求地址是 /user/name，那么两个规则都匹配， 无法确定哪个规则生效。
 
-如果分割成了两个段，我们用第一个段来检查下一个级节点中是否有匹配这个段的节点。
+所以在增加路由之前，需要判断这个路由规则是否已经在 trie 树中存在了。 
+
+这里，可以用 **matchNode 方法**，寻找某个路由在 trie 树中匹配的节点，如果有匹配节点，返回节点指针，否则返回 nil。
+
+matchNode 方法的参数是一个 URI，返回值是指向 node 的指针，它的实现思路是使用**函数递归**，简单说明一下思路： 
+
+首先，将需要匹配的 URI 根据第一个分隔符 / 进行分割，只需要最多分割成为两个段。 
+
+如果只能分割成一个段，说明 URI 中没有分隔符了，这时候再检查下一级节点中是否有匹配这个段的节点就行。
+
+如果分割成了两个段，用第一个段来检查下一个级节点中是否有匹配这个段的节点。
 
 - 如果没有，说明这个路由规则在树中匹配不到。 
-- 如果下一级节点中有符合第一个分割段的（这里需要注意可能不止一个符合），我们就 将所有符合的节点进行函数递归，重新应用于 matchNode 函数中，只不过这时候 matchNode 函数作用于子节点，参数变成了切割后的第二个段。
+- 如果下一级节点中有符合第一个分割段的（这里需要注意可能不止一个符合），就将所有符合的节点进行函数递归，重新应用于 matchNode 函数中，只不过这时候 matchNode 函数作用于子节点，参数变成了切割后的第二个段。
 
-好思路就讲完了，整个流程里，会频繁使用到“过滤下一层满足 segment 规则的子节点” ，所以我们也用一个函数 filterChildNodes 将它封装起来。这个函数的逻辑就比较简单 了：遍历下一层子节点，判断 segment 是否匹配传入的参数 segment。 在框架文件夹中的 tree.go 中，我们完成 matchNode 和 filterChildNodes 完整代码实 现，放在这里了，具体逻辑我也加了详细的批注帮你理解。
+思路就讲完了，整个流程里，会频繁使用到“过滤下一层满足 segment 规则的子节点” ，所以也用一个**函数 filterChildNodes** 将它封装起来。
+
+这个函数的逻辑就比较简单了：遍历下一层子节点，判断 segment 是否匹配传入的参数 segment。 
+
+在框架文件夹中的 tree.go 中，完成 matchNode 和 filterChildNodes 完整代码实现，放在这里了，具体逻辑也加了详细的批注。
 
 ```go
 // 判断一个segment是否是通用segment，即以:开头
 func isWildSegment(segment string) bool {
-return strings.HasPrefix(segment, ":")
+	return strings.HasPrefix(segment, ":")
 }
+
 // 过滤下一层满足segment规则的子节点
 func (n *node) filterChildNodes(segment string) []*node {
-if len(n.childs) == 0 {
-return nil
+	if len(n.childs) == 0 {
+		return nil
+	}
+	// 如果segment是通配符，则所有下一层子节点都满足需求
+	if isWildSegment(segment) {
+		return n.childs
+	}
+	nodes := make([]*node, 0, len(n.childs))
+	// 过滤所有的下一层子节点
+	for _, cnode := range n.childs {
+		if isWildSegment(cnode.segment) {
+			// 如果下一层子节点有通配符，则满足需求
+			nodes = append(nodes, cnode)
+		} else if cnode.segment == segment {
+			// 如果下一层子节点没有通配符，但是文本完全匹配，则满足需求
+			nodes = append(nodes, cnode)
+		}
+	}
+	return nodes
 }
-// 如果segment是通配符，则所有下一层子节点都满足需求
-if isWildSegment(segment) {
-return n.childs
-}
-nodes := make([]*node, 0, len(n.childs))
-// 过滤所有的下一层子节点
-for _, cnode := range n.childs {
-if isWildSegment(cnode.segment) {
-// 如果下一层子节点有通配符，则满足需求
-nodes = append(nodes, cnode)
-} else if cnode.segment == segment {
-// 如果下一层子节点没有通配符，但是文本完全匹配，则满足需求
-nodes = append(nodes, cnode)
-}
-}
-return nodes
-  }
+
 // 判断路由是否已经在节点的所有子节点树中存在了
 func (n *node) matchNode(uri string) *node {
-// 使用分隔符将uri切割为两个部分
-segments := strings.SplitN(uri, "/", 2)
-// 第一个部分用于匹配下一层子节点
-segment := segments[0]
-if !isWildSegment(segment) {
-segment = strings.ToUpper(segment)
-}
-// 匹配符合的下一层子节点
-cnodes := n.filterChildNodes(segment)
-// 如果当前子节点没有一个符合，那么说明这个uri一定是之前不存在, 直接返回nil
-if cnodes == nil || len(cnodes) == 0 {
-return nil
-}
-// 如果只有一个segment，则是最后一个标记
-if len(segments) == 1 {
-// 如果segment已经是最后一个节点，判断这些cnode是否有isLast标志
-for _, tn := range cnodes {
-if tn.isLast {
-return tn
-}
-}
-// 都不是最后一个节点
-return nil
-}
-// 如果有2个segment, 递归每个子节点继续进行查找
-for _, tn := range cnodes {
-tnMatch := tn.matchNode(segments[1])
-if tnMatch != nil {
-return tnMatch
-}
-}
-return nil
+	// 使用分隔符将uri切割为两个部分
+	segments := strings.SplitN(uri, "/", 2)
+	// 第一个部分用于匹配下一层子节点
+	segment := segments[0]
+	if !isWildSegment(segment) {
+		segment = strings.ToUpper(segment)
+	}
+	// 匹配符合的下一层子节点
+	cnodes := n.filterChildNodes(segment)
+	// 如果当前子节点没有一个符合，那么说明这个uri一定是之前不存在, 直接返回nil
+	if cnodes == nil || len(cnodes) == 0 {
+		return nil
+	}
+	// 如果只有一个segment，则是最后一个标记
+	if len(segments) == 1 {
+		// 如果segment已经是最后一个节点，判断这些cnode是否有isLast标志
+		for _, tn := range cnodes {
+			if tn.isLast {
+				return tn
+			}
+		}
+		// 都不是最后一个节点
+		return nil
+	}
+	// 如果有2个segment, 递归每个子节点继续进行查找
+	for _, tn := range cnodes {
+		tnMatch := tn.matchNode(segments[1])
+		if tnMatch != nil {
+			return tnMatch
+		}
+	}
+	return nil
 }
 ```
 
-现在有了 matchNode 和 filterChildNodes 函数，我们就可以开始写第二步里最核心的增 加路由的函数逻辑了。 首先，确认路由是否冲突。我们先检查要增加的路由规则是否在树中已经有可以匹配的节 点了。如果有的话，代表当前待增加的路由和已有路由存在冲突，这里我们用到了刚刚定 义的 matchNode。更新刚才框架文件夹中的 tree.go 文件：
+现在有了 matchNode 和 filterChildNodes 函数，就可以开始写第二步里最核心的增加路由的函数逻辑了。 
+
+首先，**确认路由是否冲突**。
+
+先检查要增加的路由规则是否在树中已经有可以匹配的节点了。如果有的话，代表当前待增加的路由和已有路由存在冲突，这里用到了刚刚定 义的 matchNode。更新刚才框架文件夹中的 tree.go 文件：
 
 ```go
-// 增加路由节点
+// AddRouter 增加路由节点
 func (tree *Tree) AddRouter(uri string, handler ControllerHandler) error {
-n := tree.root
-// 确认路由是否冲突
-if n.matchNode(uri) != nil {
-return errors.New("route exist: " + uri)
-}
-...
+	n := tree.root
+	// 确认路由是否冲突
+	if n.matchNode(uri) != nil {
+		return errors.New("route exist: " + uri)
+	}
+	
+	...
 }
 ```
 
-然后继续增加路由规则。我们增加路由的每个段时，先去树的每一层中匹配查找，如果已 经有了符合这个段的节点，就不需要创建节点，继续匹配待增加路由的下个段；否则，需 要创建一个新的节点用来代表这个段。这里，我们用到了定义的 filterChildNodes。
+然后继续**增加路由规则**。
+
+增加路由的每个段时，先去树的每一层中匹配查找，如果已 经有了符合这个段的节点，就不需要创建节点，继续匹配待增加路由的下个段；否则，需要创建一个新的节点用来代表这个段。
+
+这里，用到了定义的 filterChildNodes。
 
 ```go
-// 增加路由节点
+// AddRouter 增加路由节点
 /*
 /book/list
 /book/:id (冲突)
@@ -1667,122 +1713,142 @@ return errors.New("route exist: " + uri)
 /:user/name/:age
 */
 func (tree *Tree) AddRouter(uri string, handler ControllerHandler) error {
-n := tree.root
-if n.matchNode(uri) != nil {
-return errors.New("route exist: " + uri)
-}
-segments := strings.Split(uri, "/")
-// 对每个segment
-for index, segment := range segments {
-// 最终进入Node segment的字段
-if !isWildSegment(segment) {
-segment = strings.ToUpper(segment)
-}
-isLast := index == len(segments)-1
-var objNode *node // 标记是否有合适的子节点
-childNodes := n.filterChildNodes(segment)
-// 如果有匹配的子节点
-  if len(childNodes) > 0 {
-// 如果有segment相同的子节点，则选择这个子节点
-for _, cnode := range childNodes {
-if cnode.segment == segment {
-objNode = cnode
-break
-}
-}
-}
-if objNode == nil {
-// 创建一个当前node的节点
-cnode := newNode()
-cnode.segment = segment
-if isLast {
-cnode.isLast = true
-cnode.handler = handler
-}
-n.childs = append(n.childs, cnode)
-objNode = cnode
-}
-n = objNode
-}
-return nil
+	n := tree.root
+	// 确认路由是否冲突
+	if n.matchNode(uri) != nil {
+		return errors.New("route exist: " + uri)
+	}
+
+	segments := strings.Split(uri, "/")
+	// 对每个segment
+	for index, segment := range segments {
+		// 最终进入Node segment的字段
+		if !isWildSegment(segment) {
+			segment = strings.ToUpper(segment)
+		}
+
+		isLast := index == len(segments)-1
+
+		var objNode *node // 标记是否有合适的子节点
+
+		childNodes := n.filterChildNodes(segment)
+		// 如果有匹配的子节点
+		if len(childNodes) > 0 {
+			// 如果有segment相同的子节点，则选择这个子节点
+			for _, cnode := range childNodes {
+				if cnode.segment == segment {
+					objNode = cnode
+					break
+				}
+			}
+		}
+
+		if objNode == nil {
+			// 创建一个当前node的节点
+			cnode := newNode()
+			cnode.segment = segment
+			if isLast {
+				cnode.isLast = true
+				cnode.handler = handler
+			}
+			n.childs = append(n.childs, cnode)
+			objNode = cnode
+		}
+		n = objNode
+	}
+	return nil
 }
 ```
 
-到这里，第二步增加路由的规则逻辑已经有了，我们要开始第三步，编写“查找路由”的 逻辑。这里你会发现，由于我们之前已经定义过 matchNode（匹配路由节点），所以这 里只需要复用这个函数就行了。
+#### 查找路由的逻辑
+
+到这里，第二步增加路由的规则逻辑已经有了，要开始第三步，编写“查找路由”的 逻辑。
+
+这里会发现，由于之前已经定义过 matchNode（匹配路由节点），所以这 里只需要复用这个函数就行了。
 
 ```go
-// 匹配uri
+// FindHandler 匹配uri
 func (tree *Tree) FindHandler(uri string) ControllerHandler {
-// 直接复用matchNode函数，uri是不带通配符的地址
-matchNode := tree.root.matchNode(uri)
-if matchNode == nil {
-return nil
-}
-return matchNode.handler
+	// 直接复用matchNode函数，uri是不带通配符的地址
+	matchNode := tree.root.matchNode(uri)
+	if matchNode == nil {
+		return nil
+	}
+	return matchNode.handler
 }
 ```
 
-前三步已经完成了，最后一步，我们把“增加路由规则”和“查找路由”添加到框架中。 还记得吗，在静态路由匹配的时候，在 Core 中使用哈希定义的路由，这里将哈希替换为 trie 树。还是在框架文件夹中的 core.go 文件，找到对应位置作修改：
+#### 添加到框架中
+
+前三步已经完成了，最后一步，把“增加路由规则”和“查找路由”添加到框架中。 
+
+还记得吗，在静态路由匹配的时候，在 Core 中使用哈希定义的路由，这里将哈希替换为 trie 树。还是在框架文件夹中的 core.go 文件，找到对应位置作修改：
 
 ```go
+// Core 框架核心结构
 type Core struct {
-router map[string]*Tree // all routers
+	router map[string]*Tree // all routers
 }
 ```
 
-对应路由增加的方法，也从哈希的增加逻辑，替换为 trie 树的“增加路由规则”逻辑。同 样更新 core.go 文件中的下列方法：
+对应路由增加的方法，也从哈希的增加逻辑，替换为 trie 树的“增加路由规则”逻辑。同样更新 core.go 文件中的下列方法：
 
 ```go
-// 初始化Core结构
+// NewCore 初始化Core结构
 func NewCore() *Core {
-// 初始化路由
-router := map[string]*Tree{}
-router["GET"] = NewTree()
-router["POST"] = NewTree()
-router["PUT"] = NewTree()
-router["DELETE"] = NewTree()
-return &Core{router: router}
+	// 初始化路由
+	router := map[string]*Tree{}
+	router["GET"] = NewTree()
+	router["POST"] = NewTree()
+	router["PUT"] = NewTree()
+	router["DELETE"] = NewTree()
+	return &Core{router: router}
 }
-// 匹配GET 方法, 增加路由规则
+
+// Get 匹配GET 方法, 增加路由规则
 func (c *Core) Get(url string, handler ControllerHandler) {
-if err := c.router["GET"].AddRouter(url, handler); err != nil {
-log.Fatal("add router error: ", err)
+	if err := c.router["GET"].AddRouter(url, handler); err != nil {
+		log.Fatal("add router error: ", err)
+	}
 }
-}
-// 匹配POST 方法, 增加路由规则
+
+// Post 匹配POST 方法, 增加路由规则
 func (c *Core) Post(url string, handler ControllerHandler) {
-if err := c.router["POST"].AddRouter(url, handler); err != nil {
-log.Fatal("add router error: ", err)
+	if err := c.router["POST"].AddRouter(url, handler); err != nil {
+		log.Fatal("add router error: ", err)
+	}
 }
-}
-// 匹配PUT 方法, 增加路由规则
+
+// Put 匹配PUT 方法, 增加路由规则
 func (c *Core) Put(url string, handler ControllerHandler) {
-if err := c.router["PUT"].AddRouter(url, handler); err != nil {
-log.Fatal("add router error: ", err)
+	if err := c.router["PUT"].AddRouter(url, handler); err != nil {
+		log.Fatal("add router error: ", err)
+	}
 }
-  }
-// 匹配DELETE 方法, 增加路由规则
+
+// Delete 匹配DELETE 方法, 增加路由规则
 func (c *Core) Delete(url string, handler ControllerHandler) {
-if err := c.router["DELETE"].AddRouter(url, handler); err != nil {
-log.Fatal("add router error: ", err)
-}
+	if err := c.router["DELETE"].AddRouter(url, handler); err != nil {
+		log.Fatal("add router error: ", err)
+	}
 }
 ```
 
 之前在 Core 中定义的匹配路由函数的实现逻辑，从哈希匹配修改为 trie 树匹配就可以 了。继续更新 core.go 文件：
 
 ```go
-// 匹配路由，如果没有匹配到，返回nil
+// FindRouteByRequest 匹配路由，如果没有匹配到，返回nil
 func (c *Core) FindRouteByRequest(request *http.Request) ControllerHandler {
-// uri 和 method 全部转换为大写，保证大小写不敏感
-uri := request.URL.Path
-method := request.Method
-upperMethod := strings.ToUpper(method)
-// 查找第一层map
-if methodHandlers, ok := c.router[upperMethod]; ok {
-return methodHandlers.FindHandler(uri)
-}
-return nil
+	// uri 和 method 全部转换为大写，保证大小写不敏感
+	uri := request.URL.Path
+	method := request.Method
+	upperMethod := strings.ToUpper(method)
+	
+	// 查找第一层map
+	if methodHandlers, ok := c.router[upperMethod]; ok {
+		return methodHandlers.FindHandler(uri)
+	}
+	return nil
 }
 ```
 
@@ -1790,22 +1856,27 @@ return nil
 
 ### 验证 
 
-现在，四个需求都已经实现了。我们验证一下：定义包含有静态路由、批量通用前缀、动 态路由的路由规则，每个控制器我们就直接输出控制器的名字，然后启动服务。 这个时候我们就可以去修改业务文件夹下的路由文件 route.go：
+现在，四个需求都已经实现了。
+
+验证一下：定义包含有静态路由、批量通用前缀、动 态路由的路由规则，每个控制器直接输出控制器的名字，然后启动服务。 
+
+这个时候就可以去修改业务文件夹下的路由文件 route.go：
 
 ```go
 // 注册路由规则
 func registerRouter(core *framework.Core) {
-// 需求1+2:HTTP方法+静态路由匹配
-core.Get("/user/login", UserLoginController)
-  // 需求3:批量通用前缀
-subjectApi := core.Group("/subject")
-{
-// 需求4:动态路由
-subjectApi.Delete("/:id", SubjectDelController)
-subjectApi.Put("/:id", SubjectUpdateController)
-subjectApi.Get("/:id", SubjectGetController)
-subjectApi.Get("/list/all", SubjectListController)
-}
+	// 需求1+2:HTTP方法+静态路由匹配
+	core.Get("/user/login", UserLoginController)
+
+	// 需求3:批量通用前缀
+	subjectApi := core.Group("/subject")
+	{
+		// 需求4:动态路由
+		subjectApi.Delete("/:id", SubjectDelController)
+		subjectApi.Put("/:id", SubjectUpdateController)
+		subjectApi.Get("/:id", SubjectGetController)
+		subjectApi.Get("/list/all", SubjectListController)
+	}
 }
 ```
 
@@ -1813,9 +1884,9 @@ subjectApi.Get("/list/all", SubjectListController)
 
 ```go
 func UserLoginController(c *framework.Context) error {
-// 打印控制器名字
-c.Json(200, "ok, UserLoginController")
-return nil
+	// 打印控制器名字
+	c.Json(200, "ok, UserLoginController")
+	return nil
 }
 ```
 
@@ -1831,37 +1902,44 @@ return nil
 
 ![image-20220212000548825](web_framework_document.assets/image-20220212000548825.png)
 
-路由规则符合要求！ 今天的文件及代码结构如下，新建的文件夹多一点你可以对照着 GitHub 再看看，代码地 址在geekbang/03分支上：
+路由规则符合要求！ 
 
 ### 小结 
 
-在这一讲，我们一步步实现了满足四个需求的路由：HTTP 方法匹配、批量通用前缀、静 态路由匹配和动态路由匹配。
+在这一讲，一步步实现了满足四个需求的路由：HTTP 方法匹配、批量通用前缀、静态路由匹配和动态路由匹配。
 
-我们使用 IGroup 结构和在 Core 中定义 key 为方法的路由，实现了 HTTP 方法匹配、批 量通用前缀这两个需求，并且用哈希来实现静态路由匹配，之后我们使用 trie 树算法替代 哈希算法，实现了动态路由匹配的需求。 所以，你有没有发现，其实所谓的实现功能，写代码只是其中一小部分，如何思考、如何 考虑容错性、扩展性和复用性，这个反而是更大的部分。 以今天实现的路由这个功能为例，你是否考虑到了 URI 的容错性，在 Group 返回时候是 否使用接口增加扩展性，在实现动态匹配的时候是否考虑函数复用性。我们要记住的是， 思路比代码实现更重要。 
+使用 IGroup 结构和在 Core 中定义 key 为方法的路由，实现了 HTTP 方法匹配、批 量通用前缀这两个需求，并且用哈希来实现静态路由匹配，之后使用 trie 树算法替代哈希算法，实现了动态路由匹配的需求。 
+
+所以，其实所谓的实现功能，写代码只是其中一小部分，如何思考、如何 考虑容错性、扩展性和复用性，这个反而是更大的部分。 
+
+以实现的路由这个功能为例，是否考虑到了 URI 的容错性，在 Group 返回时候是否使用接口增加扩展性，在实现动态匹配的时候是否考虑函数复用性。要记住的是， 思路比代码实现更重要。 
 
 ### 思考题 
 
-光说不练假把式，毕竟我们是实战课，那针对第三个需求“批量通用前缀”，我们扩展一 下变成：需要能多层嵌套通用前缀，这么定义路由：
+针对第三个需求“批量通用前缀”，扩展一下变成：需要能多层嵌套通用前缀，这么定义路由：
 
 ```go
 // 注册路由规则
 func registerRouter(core *framework.Core) {
-// 静态路由+HTTP方法匹配
-core.Get("/user/login", UserLoginController)
-// 批量通用前缀
-subjectApi := core.Group("/subject")
-{
-subjectInnerApi := subjectApi.Group("/info")
-{
-subjectInnerApi.Get("/name", SubjectNameController)
-}
-}
+	// 静态路由+HTTP方法匹配
+	core.Get("/user/login", UserLoginController)
+	
+	// 批量通用前缀
+	subjectApi := core.Group("/subject")
+	{
+		subjectInnerApi := subjectApi.Group("/info")
+		{
+			subjectInnerApi.Get("/name", SubjectNameController)
+		}
+	}
 }
 ```
 
-结合刚才说的考虑代码的设计感，你想一想如何实现呢？
+结合刚才说的考虑代码的设计感，想一想如何实现呢？
 
 
+
+## 中间件
 
 
 
