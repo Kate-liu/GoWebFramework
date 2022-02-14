@@ -1,9 +1,14 @@
 package main
 
 import (
+	"context"
 	"github.com/Kate-liu/GoWebFramework/framework"
 	"github.com/Kate-liu/GoWebFramework/framework/middleware"
+	"log"
 	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
 )
 
 func main() {
@@ -33,6 +38,20 @@ func main() {
 		Addr: ":8080",
 	}
 
-	server.ListenAndServe()
+	// 这个 Goroutine 是启动服务的 Goroutine
+	go func() {
+		server.ListenAndServe()
+	}()
 
+	// 当前的 Goroutine 等待信号量
+	quit := make(chan os.Signal)
+	// 监控信号：SIGINT, SIGTERM, SIGQUIT
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
+	// 这里会阻塞当前 Goroutine 等待信号
+	<-quit
+
+	// 调用Server.Shutdown graceful结束
+	if err := server.Shutdown(context.Background()); err != nil {
+		log.Fatal("Server Shutdown:", err)
+	}
 }
