@@ -1,0 +1,14 @@
+<html>
+<body>
+<div id="context"></div>
+</body>
+</html>
+
+<script>
+    function callfun(data) {
+        document.getElementById('context').innerHTML = data;
+    }
+</script>
+
+<script src="http://B.com/jsonp?callback=callfun"></script>
+
