@@ -2,8 +2,7 @@ package main
 
 import (
 	"context"
-	"github.com/Kate-liu/GoWebFramework/framework"
-	"github.com/Kate-liu/GoWebFramework/framework/middleware"
+	"github.com/Kate-liu/GoWebFramework/framework/gin"
 	"log"
 	"net/http"
 	"os"
@@ -12,21 +11,24 @@ import (
 )
 
 func main() {
-	core := framework.NewCore()
+	// core := framework.NewCore()
+	//
+	// // core中使用use注册中间件
+	// // core.Use(
+	// // 	middleware.Test1(),
+	// // 	middleware.Test2())
+	// // group中使用use注册中间件
+	// // subjectApi := core.Group("/subject")
+	// // subjectApi.Use(middleware.Test3())
+	// // core中使用use注册中间件 Recovery
+	// core.Use(middleware.Recovery())
+	// // core中使用use注册中间件 Cost
+	// core.Use(middleware.Cost())
+	// // core中使用use注册中间件 Timeout
+	// // core.Use(middleware.Timeout(1 * time.Second))
 
-	// core中使用use注册中间件
-	// core.Use(
-	// 	middleware.Test1(),
-	// 	middleware.Test2())
-	// group中使用use注册中间件
-	// subjectApi := core.Group("/subject")
-	// subjectApi.Use(middleware.Test3())
-	// core中使用use注册中间件 Recovery
-	core.Use(middleware.Recovery())
-	// core中使用use注册中间件 Cost
-	core.Use(middleware.Cost())
-	// core中使用use注册中间件 Timeout
-	// core.Use(middleware.Timeout(1 * time.Second))
+	core := gin.New()
+	core.Use(gin.Recovery())
 
 	// 设置路由
 	registerRouter(core)
