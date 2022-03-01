@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"github.com/Kate-liu/GoWebFramework/framework/gin"
+	"github.com/Kate-liu/GoWebFramework/framework/middleware"
+	"github.com/Kate-liu/GoWebFramework/provider/demo"
 	"log"
 	"net/http"
 	"os"
@@ -28,7 +30,11 @@ func main() {
 	// // core.Use(middleware.Timeout(1 * time.Second))
 
 	core := gin.New()
+	// 绑定具体的服务
+	core.Bind(&demo.DemoServiceProvider{})
+
 	core.Use(gin.Recovery())
+	core.Use(middleware.Cost())
 
 	// 设置路由
 	registerRouter(core)

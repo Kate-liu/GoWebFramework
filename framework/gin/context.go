@@ -7,6 +7,7 @@ package gin
 import (
 	"errors"
 	"fmt"
+	"github.com/Kate-liu/GoWebFramework/framework"
 	"github.com/Kate-liu/GoWebFramework/framework/gin/binding"
 	"github.com/Kate-liu/GoWebFramework/framework/gin/render"
 	"io"
@@ -55,6 +56,9 @@ type Context struct {
 
 	engine *Engine
 	params *Params
+
+	// Context 中保存容器
+	container framework.Container
 
 	// This mutex protect Keys map
 	mu sync.RWMutex

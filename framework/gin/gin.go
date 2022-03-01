@@ -6,6 +6,7 @@ package gin
 
 import (
 	"fmt"
+	"github.com/Kate-liu/GoWebFramework/framework"
 	"github.com/Kate-liu/GoWebFramework/framework/gin/internal/bytesconv"
 	"github.com/Kate-liu/GoWebFramework/framework/gin/render"
 	"html/template"
@@ -55,6 +56,9 @@ type RoutesInfo []RouteInfo
 // Create an instance of Engine, by using New() or Default()
 type Engine struct {
 	RouterGroup
+
+	// 容器
+	container framework.Container
 
 	// Enables automatic redirection if the current route can't be matched but a
 	// handler for the path with (without) the trailing slash exists.
@@ -152,6 +156,8 @@ func New() *Engine {
 			basePath: "/",
 			root:     true,
 		},
+		// 这里注入了 container
+		container:              framework.NewHadeContainer(),
 		FuncMap:                template.FuncMap{},
 		RedirectTrailingSlash:  true,
 		RedirectFixedPath:      false,
@@ -185,7 +191,8 @@ func Default() *Engine {
 
 func (engine *Engine) allocateContext() *Context {
 	v := make(Params, 0, engine.maxParams)
-	return &Context{engine: engine, params: &v}
+	// 在分配新的 Context 的时候，注入了 container
+	return &Context{engine: engine, params: &v, container: engine.container}
 }
 
 // Delims sets template left and right delims and returns a Engine instance.
