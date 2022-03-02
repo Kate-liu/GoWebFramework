@@ -4,6 +4,7 @@ import (
 	"context"
 	"github.com/Kate-liu/GoWebFramework/framework/gin"
 	"github.com/Kate-liu/GoWebFramework/framework/middleware"
+	"github.com/Kate-liu/GoWebFramework/framework/provider/app"
 	"github.com/Kate-liu/GoWebFramework/provider/demo"
 	"log"
 	"net/http"
@@ -32,6 +33,8 @@ func main() {
 	core := gin.New()
 	// 绑定具体的服务
 	core.Bind(&demo.DemoServiceProvider{})
+	// 指定 BaseFolder
+	core.Bind(&app.HadeAppProvider{BaseFolder: "/tmp"})
 
 	core.Use(gin.Recovery())
 	core.Use(middleware.Cost())
