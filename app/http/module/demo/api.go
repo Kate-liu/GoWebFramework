@@ -1,8 +1,7 @@
 package demo
 
 import (
-	"github.com/Kate-liu/GoWebFramework/framework/contract"
-	demoService "github.com/Kate-liu/GoWebFramework/framework/demo"
+	demoService "github.com/Kate-liu/GoWebFramework/app/provider/demo"
 	"github.com/Kate-liu/GoWebFramework/framework/gin"
 )
 
@@ -33,12 +32,12 @@ func NewDemoApi() *DemoApi {
 // @Success 200 array []UserDTO
 // @Router /demo/demo [get]
 func (api *DemoApi) Demo(c *gin.Context) {
-	appService := c.MustMake(contract.AppKey).(contract.App)
-	baseFolder := appService.BaseFolder()
-	// users := api.service.GetUsers()
-	// usersDTO := UserModelsToUserDTOs(users)
-	// c.JSON(200, usersDTO)
-	c.JSON(200, baseFolder)
+	// appService := c.MustMake(contract.AppKey).(contract.App)
+	// baseFolder := appService.BaseFolder()
+	users := api.service.GetUsers()
+	usersDTO := UserModelsToUserDTOs(users)
+	c.JSON(200, usersDTO)
+	// c.JSON(200, baseFolder)
 }
 
 // Demo godoc

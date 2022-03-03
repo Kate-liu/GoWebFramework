@@ -1,68 +1,27 @@
 package main
 
 import (
-	"context"
-	"github.com/Kate-liu/GoWebFramework/framework/gin"
-	"github.com/Kate-liu/GoWebFramework/framework/middleware"
+	"github.com/Kate-liu/GoWebFramework/app/console"
+	"github.com/Kate-liu/GoWebFramework/app/http"
+	"github.com/Kate-liu/GoWebFramework/framework"
 	"github.com/Kate-liu/GoWebFramework/framework/provider/app"
-	"github.com/Kate-liu/GoWebFramework/provider/demo"
-	"log"
-	"net/http"
-	"os"
-	"os/signal"
-	"syscall"
+	"github.com/Kate-liu/GoWebFramework/framework/provider/kernel"
 )
 
 func main() {
-	// core := framework.NewCore()
-	//
-	// // core中使用use注册中间件
-	// // core.Use(
-	// // 	middleware.Test1(),
-	// // 	middleware.Test2())
-	// // group中使用use注册中间件
-	// // subjectApi := core.Group("/subject")
-	// // subjectApi.Use(middleware.Test3())
-	// // core中使用use注册中间件 Recovery
-	// core.Use(middleware.Recovery())
-	// // core中使用use注册中间件 Cost
-	// core.Use(middleware.Cost())
-	// // core中使用use注册中间件 Timeout
-	// // core.Use(middleware.Timeout(1 * time.Second))
+	// 初始化服务容器
+	container := framework.NewHadeContainer()
 
-	core := gin.New()
-	// 绑定具体的服务
-	core.Bind(&demo.DemoServiceProvider{})
-	// 指定 BaseFolder
-	core.Bind(&app.HadeAppProvider{BaseFolder: "/tmp"})
+	// 绑定 App 服务提供者
+	container.Bind(&app.HadeAppProvider{})
 
-	core.Use(gin.Recovery())
-	core.Use(middleware.Cost())
-
-	// 设置路由
-	registerRouter(core)
-
-	server := &http.Server{
-		// 自定义的请求核心处理函数
-		Handler: core,
-		// 请求监听地址
-		Addr: ":8080",
+	// 后续初始化需要绑定的服务提供者...
+	// 将 HTTP 引擎初始化,并且作为服务提供者绑定到服务容器中
+	if engine, err := http.NewHttpEngine(); err == nil {
+		container.Bind(&kernel.HadeKernelProvider{HttpEngine: engine})
 	}
 
-	// 这个 Goroutine 是启动服务的 Goroutine
-	go func() {
-		server.ListenAndServe()
-	}()
+	// 运行 root 命令
+	console.RunCommand(container)
 
-	// 当前的 Goroutine 等待信号量
-	quit := make(chan os.Signal)
-	// 监控信号：SIGINT, SIGTERM, SIGQUIT
-	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
-	// 这里会阻塞当前 Goroutine 等待信号
-	<-quit
-
-	// 调用Server.Shutdown graceful结束
-	if err := server.Shutdown(context.Background()); err != nil {
-		log.Fatal("Server Shutdown:", err)
-	}
 }
