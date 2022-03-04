@@ -6632,19 +6632,676 @@ func (s *HadeKernelService) HttpEngine() *gin.Engine {
 
 ## 定时任务：分布式定时脚本
 
+框架支持命令行工具后，业务开发者可以使用框架定义好的命令行工具来执行框架预设的一些行为，比如启动一个 Web 服务，也可以自己定义业务需要的命令行工具来执行业务行为，非常方便。 
+
+继续思考如何优化，因为业务在开发过程中，不可能每个命令都要手动操作，定时执行某个命令的需求应该是非常普遍的。
+
+比如设计一个定时扫描数据命令来发送统计报告， 或者设计一个定时删除某些过期数据的命令。 
+
+那框架是否能支持这个需求，如果要开发一个定时命令，能不能做到在业务中增加一行代码就行了？来挑战这个目标。
+
+### 使用 timer 定时执行命令 
+
+怎么做到计时执行这个事情呢？
+
+Golang 有个标准库 time，里面提供一个计时器 timer 的结构，是否可以使用这个 timer 来执行呢？先来看看 timer 是怎么使用的：
+
+```go
+func main() {
+	timer := time.NewTimer(3 * time.Second) // 定一个计时器，3s后触发
+	select {
+		now <- timer.C: // 监听计时器中的事件
+			fmt.Println("3秒执行任务, 现在时间", now) // 3s后执行
+	}
+}
+```
+
+首先 time.NewTimer 会初始化一个计时器，这个计时器到定时时间后，就从 C 这个 channel 中返回一个时间 Time。
+
+逻辑很简单。所以 main 函数只需要监听 timer.C 这个 channel，一旦有时间从这个 channel 中出来，就说明到计时器时间了。 
+
+知道如何定时执行了，接下来得结合实际业务场景考虑会存在什么问题了：如果有一堆定时任务，要怎么定时执行呢？ 
+
+这个也不难：遍历所有的定时任务，计算出这些定时任务下一次要执行的时间，然 后按照从近到远排序，用 timer 来设置一个定时器到最近的时间触发，然后等计时一到， 开启一个 Goroutine 触发执行。触发之后再进行一轮计算，计算出所有定时任务下一次要执行的时间，再初始化一个定时器。 
+
+写一下大致的伪代码如下。
+
+- 假设定义每个定时任务结构为 Entry，先计算每个 Entry 的下一次运行的时间，接着进 入循环； 
+- 在循环中，根据 Next 排序，然后根据最近的 Entry 实例化一个计时器，进入阻塞等 待； 
+- 等计时器时间到了，通过 timer.C 获取到时间，再进行遍历，把到了时间的任务进行一 次执行，并且更新所有任务的下次执行时间。
+
+```go
+// Entity代表每个定时任务
+entries := []Entry
+
+// 计算每个定时任务时间
+for _, entry := entries {
+  entry.Next = next(entry)
+}
+
+for {
+  // 根据Next时间排序
+  sortByTime(entries)
+
+  // 创建计时器
+  timer = time.NewTimer(entries.Early.Sub(time.Now()))
+
+  select {
+    case now = <-timer.C:
+    for _, entry := entries {
+      // 对已经到了时间的任务，执行
+      if entry.Next.Ok() {
+        go startJob(entry)
+      }
+
+      // 所有任务重新计算下个timer
+      entry.Next = next(entry)
+    }
+  }
+}
+```
+
+### 使用 cron 包定时执行命令 
+
+其实刚才对定时执行任务的分析，就是开源定时执行库 cron 的核心实现。 
+
+cron 库的作者 robfig 是一名资深的 Golang 开源贡献者，最出名的两个作品 cron 库和 Revel 框架目前已经分别有了 8.4k 和 12.4k 的 star 数。cron 库的 Licence 是基于 MIT 的，允许商用、允许私有化，目前最新的稳定版本为 v3。 
+
+cron 库可以实现多个定时任务的执行功能，核心原理正如刚才讲的那样，底层也是使用 timer 来进行每个定时任务的计算，但是细节实现远不止这些。看它的用法就能感受出来：
+
+```go
+// 创建一个cron实例
+c := cron.New()
+
+// 每整点30分钟执行一次
+c.AddFunc("30 * * * *", func() {
+  fmt.Println("Every hour on the half hour")
+})
+
+// 上午3-6点，下午8-11点的30分钟执行
+c.AddFunc("30 3-6,20-23 * * *", func() {
+  fmt.Println(".. in the range 3-6am, 8-11pm")
+})
+
+// 东京时间4:30执行一次
+c.AddFunc("CRON_TZ=Asia/Tokyo 30 04 * * *", func() {
+  fmt.Println("Runs at 04:30 Tokyo time every day")
+})
+
+// 从现在开始每小时执行一次
+c.AddFunc("@hourly", func() {
+  fmt.Println("Every hour, starting an hour from now")
+})
+
+// 从现在开始，每一个半小时执行一次
+c.AddFunc("@every 1h30m", func() {
+  fmt.Println("Every hour thirty, starting an hour thirty from now")
+})
+
+// 启动cron
+c.Start()
+
+...
+// 在cron运行过程中增加任务
+c.AddFunc("@daily", func() { fmt.Println("Every day") })
+..
+
+// 查看运行中的任务
+inspect(c.Entries())
+..
+
+// 停止cron的运行，优雅停止，所有正在运行中的任务不会停止。
+c.Stop()
+```
+
+这个例子充分展示了这个库的能力。 
+
+首先，它具有极其丰富的“时间描述语言”。可以通过和 Linux 的 crontab 一样的语 法，定义五个星号来表示在一天中的某个时间点，时间点的维度可以是分钟、小时、日、 月、星期，也可以将这五个星号替换为不同维度的值或者范围。
+
+前两个例子就很好地展示了在每小时 30 分的时候，和在上午 3-6 点、下午 8-11 点的每 30 分钟的时候执行的方法。 
+
+而第三个例子，它定义了日本东京时区的某个时间点来执行，这个已经超出了 Linux 的 crontab 能力了。
+
+看第四、五个例子，它还能通过符号 @ 和非常语义化的 hourly、every 1h30m 的描述语句，来表示从现在开始的时间计算。 
+
+或许会好奇这种神奇的时间描述语言是怎么实现的？可以看 cron 源码的parser.go文 件。它的本质就是将字符串解析成为一个包含秒、分、小时等时间数据的结构 SpecSchedule。
+
+看下面的部分源码：
+
+```go
+// 用来表示调度时间的一个结构
+type SpecSchedule struct {
+  // Dom表示dayOfMonth,每个月的第几天
+  // Dow表示dayOfWeek,每个星期的第几天
+  Second, Minute, Hour, Dom, Month, Dow uint64
+  
+  // 时区
+  Location *time.Location
+}
+```
+
+会发现 SpecSchedule 中有秒的时间字段，是的，这是想介绍这个库的第二个强大能 力：**支持秒级别的定时**。看下面的例子：
+
+```go
+// 创建一个cron实例
+c := cron.New(cron.WithParser(cron.NewParser(cron.SecondOptional | cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow | cron.Descriptor)))
+
+// 每秒执行一次
+c.AddFunc("* * * * * *", func() {
+  fmt.Println("Every hour on the half hour")
+})
+```
+
+在初始化实例的时候使用 NewParser，设置了允许定时字符串支持秒级别的选项 cron.SecondOptional。这样，可以使用 6 个星号来表示在秒级别的时候调用一次。 这个功能是很多第三方库，甚至 Linux 的 crontab 都做不到的。 
+
+除了这两个强大的能力之外，cron 还支持动态增加定时任务、任务调用链等功能。
+
+### 定时命令的思路与实现
+
+下一步就是要考虑如何将 cron 库应用在 hade 框架中了。 
+
+从使用角度开始思考，挑战**只增加一行代码就能定时执行某个命令**。那这个代码应该有两个参数，一是设置定时时间，二是定制执行的命令。就像这样：
+
+```go
+// 每秒调用一次Foo命令
+rootCmd.AddCronCommand("* * * * * *", demo.FooCommand)
+```
+
+第一个参数对应 cron 库中的“时间描述语言”，第二个参数对应 Command 结构。 
+
+从刚才的两个使用小例子能看到，在 cron 库中，增加一个定时任务的 AddFunc 方法，有两个参数：时间描述语言、匿名函数。
+
+那么，AddCronCommand 函数中核心要做的，就是将 Command 结构的执行封装成一个匿名函数，再调用 cron 的 AddFunc 方法就可以了。 
+
+这里还有一个需要先解决的问题，cron 库需要初始化一个 Cron 对象，就是上面库例子中 的 cron.New 方法创建的对象，这个 Cron 对象存放在哪里呢？ 
+
+已经将服务容器 container 存放在根 Command 中，让所有的命令都可以通过 Root() 方法获取到根 Command，再获取到 container。
+
+那这里也可以如法炮制， **将初始化的 Cron 对象放在根 Command 中**。 
+
+所以，在框架目录的 framework/cobra/Command.go 中，对 Command 结构进行修改：
+
+```go
+type Command struct {
+  // Command支持cron，只在RootCommand中有这个值
+  Cron *cron.Cron
+  // 对应Cron命令的信息
+  CronSpecs []CronSpec
+  ...
+}
+```
+
+除了在根 Command 结构中放入 Cron 实例，还放入了一个 CronSpecs 的数组，这个数组用来保存所有 Cron 命令的信息，为后续查看所有定时任务而准备。 
+
+思考清楚了这些，就能开始动手写 AddCronCommand 这个函数了。 
+
+### cron 的初始化和回调
+
+先获取根 Command，判断是否已经初始化了 Cron 实例，如果没有，就要初始化。
+
+接着，补充 Cron 命令的信息到 CronSpecs 数组中。最后封装一个匿名函数，在这个匿名函数中，将要执行的 Command 进行封装。
+
+```go
+// AddCronCommand 是用来创建一个Cron任务的
+func (c *Command) AddCronCommand(spec string, cmd *Command) {
+	// cron结构是挂载在根Command上的
+	root := c.Root()
+	if root.Cron == nil {
+		// 初始化cron
+		root.Cron = cron.New(cron.WithParser(cron.NewParser(cron.SecondOptional | cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow | cron.Descriptor)))
+		root.CronSpecs = []CronSpec{}
+	}
+	// 增加说明信息
+	root.CronSpecs = append(root.CronSpecs, CronSpec{
+		Type: "normal-cron",
+		Cmd:  cmd,
+		Spec: spec,
+	})
+
+	// 制作一个rootCommand
+	var cronCmd Command
+	ctx := root.Context()
+	cronCmd = *cmd
+	cronCmd.args = []string{}
+	cronCmd.SetParantNull()
+	cronCmd.SetContainer(root.GetContainer())
+
+	// 增加调用函数
+	root.Cron.AddFunc(spec, func() {
+		// 如果后续的command出现panic，这里要捕获
+		defer func() {
+			if err := recover(); err != nil {
+				log.Println(err)
+			}
+		}()
+
+		err := cronCmd.ExecuteContext(ctx)
+		if err != nil {
+			// 打印出err信息
+			log.Println(err)
+		}
+	})
+}
+```
+
+这里有几个细节需要注意一下。 
+
+封装匿名函数的时候，要记得保证这个匿名函数不会抛出异常，因为在 cron 中，匿名函数是开启一个 Goroutine 来执行的，而在 Golang 中，每个 Goroutine 都是平等的，任何一个 Goroutine 出现 panic，都会导致整个进程中止。 
+
+另外在匿名函数中，封装的并不是传递进来的 Command，而是把这个 Command 做了一个副本，并且将其父节点设置为空，让它自身就是一个新的根节点；然后调用这个 Command 的 Execute 方法。 
+
+这么做主要是因为在调试过程中发现，cobra 库在执行任意一个 Command 的 Execute 系列方法时，都会从根 Command 开始，根据参数进行遍历查询。这是因为是通过定时器进行调用的，这个定时器调用并没有真正的控制台，如果希望找到这个 cronCmd，直接调用其 Execute 命令就行。 
+
+所以在上面的代码里，复制了一个当前 Command 结构的 cronCmd，并且将其设置为根 Command，就是 SetParentNull() 函数，将其上游设置为空，就可以直接在定时器启动的时候调用这个 cronCmd 的 ExecuteCrontext 了。 
+
+### 启动 cron 的思路与实现 
+
+现在完成了 cron 的初始化和回调，下面要解决启动 cron 的时机了。 
+
+已经将 main 函数修改为一个命令行调用，还将启动 Web 服务设计为一个子命 令。
+
+那么类比到这里，启动 cron 服务也应该改造成为一个子命令。所以定义一个二级命令 cron，五个三级命令 start、stop、restart、list、state。
+
+```go
+～: ./hade cron
+定时任务相关命令
+
+Usage:
+  hade cron [flags]
+  hade cron [command]
+
+Available Commands:
+  list 列出所有的定时任务
+  restart 重启cron常驻进程
+  start 启动cron常驻进程
+  state cron常驻进程状态
+  stop 停止cron常驻进程
+
+Flags:
+	-h, --help help for cron
+
+Use "hade cron [command] --help" for more information about a command.
+```
+
+这五个三级命令中最核心的就是启动 cron 的命令，详细讲解这个命令，其他的大同小异。 
+
+在./hade cron start 这个命令中，必须要考虑的有两个问题： 
+
+首先，希望**使用 cron 的三级命令对某个进程进行管理**。想达到这个目的，获取这个被管理进程的 PID，并放入指定文件中非常重要，只有这样，才能在不同命令之间，通过获取这个 PID，来查询或者停止这个进程。 
+
+解决方案倒不难。获取当前进程，可以使用标准库 os.GetPid() 。而 PID 的存放目录，在定义服务目录的时候，有一个 runtimeFolder 是存放当前运行状态文件的，可以把 cron 进程的 PID 存放在这个目录中。 
+
+其次，在启动常驻进程的时候，可能以**直接挂起进程的方式**启动，也可能**以后台 deamon 的方式**启动，所以对于 start 的命令最好能支持两种形态。
+
+这两种形态可以通过一个参数进行区分，在文件 framework/command/cron.go 中增加 deamon 参数：
+
+```go
+// start命令有一个deamon参数，简写为d
+cronStartCommand.Flags().BoolVarP(&cronDaemon, "daemon", "d", false, "start serve daemon")
+```
+
+直接挂起的逻辑比较简单，就是直接调用 cron 的 Run 函数：
+
+```go
+c.Root().Cron.Run()
+```
+
+那么如何以 deamon 方式后台运行一个命令呢？
+
+或许第一反应是直接**进行系统调用 fork** 行不行？
+
+不行。 因为在 Golang 中，fork 可以启动一个子进程，但是这个子进程是无法继承父进程的调度模型的。Golang 的调度模型是在用户态的 runtime 中自己进行调度的，而系统调用 fork 出来的子进程默认只会有单线程。
+
+所以在 Golang 中尽量不要使用 fork 的方式来复制启动当前进程。 
+
+这里，实际上希望能 fork 出一个同样有运行到当前代码 Go 环境的进程。 
+
+另一个办法是**使用 os.StartProcess 来启动一个进程**，执行当前进程相同的二进制文件以及当前进程相同的参数。同时，由于二进制文件相同，还要为启动的子进程单独配置一个环境变量，这样在生成二进制文件的代码中，就能根据环境变量区分是主进程还是子进程。 
+
+这里整个启动子进程的方法在开源社区已经有封装好的了——**开源库 go-deamon**。这个开源库目前 star 数有 1.5k，采用 MIT 的 licence，是现在比较流行的将进程 deamon 化的库了。
+
+它的原理和上面分析的是一样的，看下使用思路。 这个库会初始化一个 daemon.Context 结构，在这个结构中可以设置子进程的参数、环境变量、PID 生成的文件、输出日志生成的文件、权限等。
+
+然后调用一个 Reborn 方法启动一个子进程，这个 Reborn 除了 error 之外，还有一个返回值 os.Process，如果非空，代表当前为父进程，能从这个方法获取子进程信息，如果为空，代表当前为子进程。
+
+### 启动 cron 的实现 
+
+现在启动 cron 命令的两个实现关键点都考虑清楚了。 
+
+结合当前的需求，要启动一个子进程，命令为：./hade cron start -- deamon=true，这个子进程会运行 cron.Run，子进程 PID 写入 runtimeFolder 目录下，子进程日志打印在 logFolder 目录下。而父进程打印成功信息，直接返回，不做任何操作。
+
+代码 framework/command/cron.go 中的 cronStartCommand 核心逻辑如下：
+
+```go
+// deamon 模式
+if cronDaemon {
+  // 创建一个Context
+  cntxt := &daemon.Context{
+    // 设置pid文件
+    PidFileName: serverPidFile,
+    PidFilePerm: 0664,
+    // 设置日志文件
+    LogFileName: serverLogFile,
+    LogFilePerm: 0640,
+    // 设置工作路径
+    WorkDir: currentFolder,
+    // 设置所有设置文件的mask，默认为750
+    Umask: 027,
+    // 子进程的参数，按照这个参数设置，子进程的命令为 ./hade cron start --daemon=true
+    Args: []string{"", "cron", "start", "--daemon=true"},
+  }
+  // 启动子进程，d不为空表示当前是父进程，d为空表示当前是子进程
+  d, err := cntxt.Reborn()
+  if err != nil {
+    return err
+  }
+  if d != nil {
+    // 父进程直接打印启动成功信息，不做任何操作
+    fmt.Println("cron serve started, pid:", d.Pid)
+    fmt.Println("log file:", serverLogFile)
+    return nil
+  }
+
+  // 子进程执行Cron.Run
+  defer cntxt.Release()
+  fmt.Println("daemon started")
+  gspt.SetProcTitle("hade cron")
+  c.Root().Cron.Run()
+  return nil
+}
+```
+
+下面验证一下前面对定时任务的改造是否成功。先在业务 app/console/command/demo/foo.go 中创建一个 Foo 命令，它的执行行为就是打印一行字符“execute foo command”：
+
+```go
+// FooCommand 代表Foo命令
+var FooCommand = &cobra.Command{
+	Use:     "foo",
+	Short:   "foo的简要说明",
+	Long:    "foo的长说明",
+	Aliases: []string{"fo", "f"},
+	Example: "foo命令的例子",
+	RunE: func(c *cobra.Command, args []string) error {
+		log.Println("execute foo command")
+		return nil
+	},
+}
+```
+
+然后将这个 FooCommand，通过 AddCronCommand 绑定到根 Command 中，并且设置其调用时间为每秒调用一次。
+
+```go
+// 绑定业务的命令
+func AddAppCommand(rootCmd *cobra.Command) {
+  // 每秒调用一次Foo命令
+  rootCmd.AddCronCommand("* * * * * *", demo.FooCommand)
+}
+```
+
+启动三级命令行工具./hade cron start -d，看到控制台打印出了子进程 PID 信息， 和日志存储地址。
+
+![image-20220303205655397](web_framework_document.assets/image-20220303205655397.png)
+
+使用 tail 命令查看日志，可以看到确实是每秒执行打印一次字符串：execute foo command
+
+![image-20220303205728072](web_framework_document.assets/image-20220303205728072.png)
+
+到这里，对框架的定时命令改造就完成了。 
+
+### 如何实现分布式定时器
+
+但现在的定时器还是单机版本的定时器，**容灾性**很低，如果有很多定时任务都挂载在一个进程中，一旦这个进程或者这个机器出现灾难性不可恢复，那么定时任务就直接无法运行了。 
+
+容灾性更高的是分布式定时器。也就是很多机器都同时挂载定时任务，在同一时间都启动任务，只有一台机器能抢占到这个定时任务并且执行，其他机器由于抢占不到定时任务， 不执行任何操作。 
+
+框架也能做到这个分布式定时器的功能。 这种分布式定时器如何实现呢？
+
+第一个想到的是不是使用 Redis？用 **Redis 做一个分布式锁**，然后所有进程去抢占这个锁。 这样思考问题就比较低层次了。
+
+讲了**面向接口编程的思想**，这里就可以用到这个思想。先定义接口，这个接口的功能是一个分布式的选择器，当有很多节点要执行某个服务的时候，只选择出其中一个节点。这样不管底层是否用 Redis 实现分布式选择器，在业务层都可以不用关心。 
+
+在文件 framework/contract/distributed.go 文件中。
+
+先定义接口 Distributed。其中有一个分布式选举方法 Select。它的参数有三个，serviceName 代表服务名字、appID 代表节点的 ID、holdTime 表示这个选择结果持续多久，也就是在选举出来之后多久内有效。
+
+它返回两个值，selectAppID 表示选举的结果，即最终哪个节点被选举出来了，另一个返回值 error 表示异常。
+
+```go
+import "time"
+
+// DistributedKey 定义字符串凭证
+const DistributedKey = "hade:distributed"
+
+// Distributed 分布式服务
+type Distributed interface {
+	// Select 分布式选择器, 所有节点对某个服务进行抢占，只选择其中一个节点
+	// ServiceName 服务名字
+	// appID 当前的AppID
+	// holdTime 分布式选择器hold住的时间
+	// 返回值
+	// selectAppID 分布式选择器最终选择的App
+	// err 异常才返回，如果没有被选择，不返回err
+	Select(serviceName string, appID string, holdTime time.Duration) (selectApp
+}
+```
+
+这里提到了一个 appID 是之前没有见过的，简单说明一下。appID 是为每个当前应用起的唯一标识，它用 Google 的 uuid 生成库就可以很方便生成。
+
+它怎么通过服务容器获取呢？可以将 appID 作为服务容器中 App 服务的一个方法，这样就能从服务容器中获取 App 服务，再获取到 appID 了。 
+
+所以这里插一步来修改对应的 App 接口和其对应实现 HadeApp，详细的修改点都以注释的形式写在下面代码中了。 
+
+在 framework/contract/framework/contract/app.go 中增加 AppID 的接口函数：
+
+```go
+// App 定义接口
+type App interface {
+  // AppID 表示当前这个app的唯一id, 可以用于分布式锁等
+  AppID() string
+  ...
+}
+```
+
+在 framework/provider/app/service.go 中也增加对 AppID 的实现：
+
+```go
+// HadeApp 代表hade框架的App实现
+type HadeApp struct {
+  ...
+  appId string // 表示当前这个app的唯一id, 可以用于分布式锁等
+}
+
+// NewHadeApp 初始化HadeApp
+func NewHadeApp(params ...interface{}) (interface{}, error) {
+  ...
+  appId := uuid.New().String()
+  return &HadeApp{baseFolder: baseFolder, container: container, appId: appId}, nil
+}
+
+// AppID 表示这个App的唯一ID
+func (h HadeApp) AppID() string {
+  return h.appId
+}
+```
+
+分布式服务 Distributed 的接口定义好，再回到它的具体实现。 这个具体实现就有很多方式了，Redis 只是其中一种而已。
+
+这里就实现一个**本地文件锁**。当一个服务器上有多个进程需要进行抢锁操作，文件 锁是一种单机多进程抢占的很简易的实现方式。在 Golang 中，其使用方法也比较简单。 
+
+多个进程同时使用 os.OpenFile 打开一个文件，并使用 syscall.Flock 带上 syscall.LOCK_EX 参数来对这个文件加文件锁，这里只会有一个进程抢占到文件锁，而其他抢占不到的进程从 syscall.Flock 函数中获取到的就是 error。
+
+根据这个 error 是否为空，就能判断是否抢占到了文件锁。 
+
+释放文件锁有两种方式，一种方式是调用 syscall.Flock 带上 syscall.LOCK_UN 的参数， 另外一种方式是抢占到锁的进程结束，也会自动释放文件锁。 
+
+来看分布式选择器的本地文件锁的具体实现，在代码 framework/provider/distributed/service_local.go 文件中：
+
+```go
+// Select 为分布式选择器
+func (s LocalDistributedService) Select(serviceName string, appID string, holdTime time.Duration) (selectAppID string, err error) {
+	appService := s.container.MustMake(contract.AppKey).(contract.App)
+	runtimeFolder := appService.RuntimeFolder()
+	lockFile := filepath.Join(runtimeFolder, "disribute_"+serviceName)
+
+	// 打开文件锁
+	lock, err := os.OpenFile(lockFile, os.O_RDWR|os.O_CREATE, 0666)
+	if err != nil {
+		return "", err
+	}
+
+	// 尝试独占文件锁
+	err = syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+	// 抢不到文件锁
+	if err != nil {
+		// 读取被选择的appid
+		selectAppIDByt, err := ioutil.ReadAll(lock)
+		if err != nil {
+			return "", err
+		}
+		return string(selectAppIDByt), err
+	}
+
+	// 在一段时间内，选举有效，其他节点在这段时间不能再进行抢占
+	go func() {
+		defer func() {
+			// 释放文件锁
+			syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
+			// 释放文件
+			lock.Close()
+			// 删除文件锁对应的文件
+			os.Remove(lockFile)
+		}()
+		// 创建选举结果有效的计时器
+		timer := time.NewTimer(holdTime)
+		// 等待计时器结束
+		<-timer.C
+	}()
+
+	// 这里已经是抢占到了，将抢占到的appID写入文件
+	if _, err := lock.WriteString(appID); err != nil {
+		return "", err
+	}
+	return appID, nil
+}
+```
+
+大概逻辑是先打开或者创建文件锁对应的文件，然后在这个文件上加上文件锁，加上锁的过程就是抢占的过程。
+
+对于没有抢占到的，文件中内容为抢占到的那个应用的 ID，将应用 ID 返回；抢占到的，就写入自己的应用 ID 到文件中，并且通过一个新的 Goroutine 开启计时器，等待计时器结束后解开文件锁，并且删除文件锁对应的文件。 
+
+而这个分布式服务 Distributed 的服务提供者 framework/provider/distributed/provider_local.go 的逻辑就比较简单了，就是正常的实现 serviceProvider 的 5 个方法，这里就不赘述了。 
+
+现在有了分布式选择器，就可以实现分布式调度了。
+
+为 Command 结构增加一个方法 AddDistributedCronCommand，这个方法有四个参数：
+
+- serviceName 这个服务的唯一名字，不允许带有空格 
+- spec 具体的执行时间
+- cmd 具体的执行命令 
+- holdTime 表示如果我选择上了，这次选择持续的时间也就是锁释放的时间
+
+它的实现和 AddCronCommand 差不多，唯一的区别就是在封装 cron.AddFunc 的匿名函数中，运行目标命令之前，要做一次分布式选举，如果被选举上了，才执行目标命令。 
+
+所以来增加一个文件，在 framework/cobra/hade_command_distributed.go 中，定义 AddDistributedCronCommand 方法：
+
+```go
+// AddDistributedCronCommand 实现一个分布式定时器
+// serviceName 这个服务的唯一名字，不允许带有空格
+// spec 具体的执行时间
+// cmd 具体的执行命令
+// holdTime 表示如果我选择上了，这次选择持续的时间，也就是锁释放的时间
+func (c *Command) AddDistributedCronCommand(serviceName string, spec string, cmd *Command, holdTime time.Duration) {
+	root := c.Root()
+
+	// 初始化cron
+	if root.Cron == nil {
+		root.Cron = cron.New(cron.WithParser(cron.NewParser(cron.SecondOptional | cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow | cron.Descriptor)))
+		root.CronSpecs = []CronSpec{}
+	}
+
+	// cron命令的注释，这里注意Type为distributed-cron，ServiceName需要填写
+	root.CronSpecs = append(root.CronSpecs, CronSpec{
+		Type:        "distributed-cron",
+		Cmd:         cmd,
+		Spec:        spec,
+		ServiceName: serviceName,
+	})
+
+	appService := root.GetContainer().MustMake(contract.AppKey).(contract.App)
+	distributeServce := root.GetContainer().MustMake(contract.DistributedKey).(contract.Distributed)
+	appID := appService.AppID()
+
+	// 复制要执行的command为cronCmd，并且设置为rootCmd
+	var cronCmd Command
+	ctx := root.Context()
+	cronCmd = *cmd
+	cronCmd.args = []string{}
+	cronCmd.SetParantNull()
+
+	// cron增加匿名函数
+	root.Cron.AddFunc(spec, func() {
+		// 防止panic
+		defer func() {
+			if err := recover(); err != nil {
+				log.Println(err)
+			}
+		}()
+
+		// 节点进行选举，返回选举结果
+		selectedAppID, err := distributeServce.Select(serviceName, appID, holdTime)
+		if err != nil {
+			return
+		}
+
+		// 如果自己没有被选择到，直接返回
+		if selectedAppID != appID {
+			return
+		}
+
+		// 如果自己被选择到了，执行这个定时任务
+		err = cronCmd.ExecuteContext(ctx)
+		if err != nil {
+			log.Println(err)
+		}
+	})
+}
+```
+
+完成了实现逻辑，下面照例做验证。 
+
+将打印字符“execute foo command”的 FooCommand 命令执行的服务名设置为 “foo_func_for_test”。设置为每 5 秒进行一次选举并产生结果，每次选举结果保留 2 秒 钟：
+
+```go
+// 绑定业务的命令
+func AddAppCommand(rootCmd *cobra.Command) {
+  // 启动一个分布式任务调度，调度的服务名称为init_func_for_test，每个节点每5s调用一次Fo
+	rootCmd.AddDistributedCronCommand("foo_func_for_test", "*/5 * * * * *", demo.FooCommand, 2*time.Second)
+}
+```
+
+开启两个控制台，启动两个进程 ./hade cron start 。
+
+> 测试失败了，出现错误：panic: contract hade:distributed have not register。
+>
+> 待解决！
+
+![image-20220303210016436](web_framework_document.assets/image-20220303210016436.png)
+
+![image-20220303210033638](web_framework_document.assets/image-20220303210033638.png)
+
+能看到 36 分 00 秒的任务是在 PID 为 40425 的进程执行，而 36 分 05 秒的任务是在 PID 为 40653 的进程执行。
+
+而且仿造容灾演练，关闭掉其中任何一个进程，剩余每 5 秒钟执行的任务，都会落在存活的那个进程中。
+
+### 小结 
+
+先使用 cron 包来为框架增加了定时执行命令的功能。
+
+在实现过程中，介绍了在 Golang 中，如何启动一个当前二进制文件的子进程。这个启动子进程的方式非常重要，后续在多个命令行工具中还会使用到，得熟练掌握。 
+
+接着一起实现了分布式定时器的功能。在实现分布式定时器的功能中，也能更深一步感受到面向接口编程和服务容器设计的好处。比如说实现分布式定时器需 要 appID，就去 app 服务中增加一个获取 AppID 的接口；需要分布式选举服务，就创建了一个分布式服务接口。
 
 
 
-
-
-
-
-
-
-
-
-
-
-
-
+## 配置和环境：定义接口
 
