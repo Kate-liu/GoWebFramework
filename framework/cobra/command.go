@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"github.com/Kate-liu/GoWebFramework/framework"
+	"github.com/robfig/cron/v3"
 	"io"
 	"os"
 	"path/filepath"
@@ -39,6 +40,12 @@ type FParseErrWhitelist flag.ParseErrorsWhitelist
 type Command struct {
 	// 服务容器
 	container framework.Container
+
+	// Command支持cron，只在RootCommand中有这个值
+	Cron *cron.Cron
+	// 对应Cron命令的信息
+	CronSpecs []CronSpec
+
 	// Use is the one-line usage message.
 	// Recommended syntax is as follow:
 	//   [ ] identifies an optional argument. Arguments that are not enclosed in brackets are required.
@@ -169,7 +176,7 @@ type Command struct {
 	// errWriter is a writer defined by the user that replaces stderr
 	errWriter io.Writer
 
-	//FParseErrWhitelist flag parse errors to be ignored
+	// FParseErrWhitelist flag parse errors to be ignored
 	FParseErrWhitelist FParseErrWhitelist
 
 	// CompletionOptions is a set of options to control the handling of shell completion

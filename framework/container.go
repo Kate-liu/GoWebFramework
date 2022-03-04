@@ -88,7 +88,7 @@ func (hade *HadeContainer) Make(key string) (interface{}, error) {
 func (hade *HadeContainer) MustMake(key string) interface{} {
 	serv, err := hade.make(key, nil, false)
 	if err != nil {
-		panic(err)
+		panic("container not contain key " + key)
 	}
 	return serv
 }
